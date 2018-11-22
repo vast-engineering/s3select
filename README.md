@@ -9,6 +9,7 @@ Example query run on 10GB of GZIP compressed JSON data (>60GB uncompressed)
 2) Is lightweight on the client side because all filtering is done on a machine where the S3 data is located 
 4) It's [cheap](https://aws.amazon.com/s3/pricing/#Request_pricing_.28varies_by_region.29) at $0.002 per GB scanned and $0.0007 per GB returned<br>
 For more details about S3 select see this [presentation](https://www.youtube.com/watch?v=uxcyoc6uaLM).<p>
+
 Unfortunately, S3 select API query call is limited to only one file on S3 and syntax is quite cumbersome, making it very impractical for daily usage. These are and more flaws are intended to be fixed with this s3select command.    
 
 ### Features at a glance
