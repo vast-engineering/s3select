@@ -23,7 +23,7 @@ Most important features:
  7) You can easily limit the number of results returned while still keeping multi-threaded execution.
  8) Failed requests are properly handled and repeated if they are retriable (e.g. throttled calls). 
 
-### Installation
+### Installation and Upgrade
 s3select is developed in Python and uses [pip](http://www.pip-installer.org/en/latest/).<p>
 
 The easiest way to install/upgrade s3select is to use `pip` in a `virtualenv`:
