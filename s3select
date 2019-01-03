@@ -12,8 +12,6 @@ import sys
 import time
 from botocore.exceptions import EndpointConnectionError, ClientError
 
-s3 = boto3.client('s3')
-
 
 def safe_print(to_print, **kwargs):
     # let's refresh status by default
@@ -284,6 +282,9 @@ if __name__ == "__main__":
                    help="How many threads to use when executing s3_select api "
                         "requests. Default of 200 seems to be max that doesn't "
                         "cause throttling on AWS side")
+    a.add_argument("--profile",
+                   help="Use a specific profile from your credential file.")
+
     args = a.parse_args()
 
     counters = {
@@ -301,5 +302,10 @@ if __name__ == "__main__":
 
     if args.delim is not None and "\\t" in args.delim:
         args.delim = '\t'
+
+    if args.profile is not None:
+        boto3.setup_default_session(profile_name=args.profile)
+
+    s3 = boto3.client('s3')
 
     select()
