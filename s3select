@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-
 from __future__ import print_function
 
 import argparse
@@ -7,251 +5,263 @@ import boto3
 from six.moves.urllib import parse
 from six.moves import queue
 import threading
-
 import sys
 import time
 from botocore.exceptions import EndpointConnectionError, ClientError
 
-
-def safe_print(to_print, **kwargs):
-    # let's refresh status by default
-    status_refresh = kwargs.pop('status_refresh', True)
-
-    with print_lock:
-        # first delete status we writen in the past to stderr
-        if 'file' in kwargs and kwargs['file'] == sys.stderr:
-            to_print = "\r\033[K" + to_print
-            print(to_print, **kwargs)
-        else:
-            print("\r\033[K", end="", file=sys.stderr)
-            print(to_print, **kwargs)
-
-    if status_refresh:
-        print_status()
-
-
-def print_status(**kwargs):
-    ending = kwargs.pop('end', "")
-
-    if not (args.disable_progress
-            or (args.limit != 0
-                and counters['matches_count'].value() > args.limit)):
-        safe_print('Files processed: {}/{}  Records matched: {}  '
-                   'Failed requests: {}'
-                   .format(counters['files_processed'].value(),
-                           counters['total_files'].value(),
-                           counters['matches_count'].value(),
-                           counters['failed_requests'].value()),
-                   end=ending, file=sys.stderr, status_refresh=False)
+_sentinel = object()
+max_result_limit_reached = False
+total_files = 0
 
 
 class S3ListThread(threading.Thread):
-    def __init__(self, the_bucket, the_prefix, files_queue):
+    def __init__(self, bucket, s3_prefix, files_queue):
 
         threading.Thread.__init__(self)
-        self.the_bucket = the_bucket
-        self.the_prefix = the_prefix
+        self.the_bucket = bucket
+        self.the_prefix = s3_prefix
         self.files_queue = files_queue
+        self.handled = False
 
     def run(self):
+        global total_files
         paginator = s3.get_paginator('list_objects_v2')
         pages = paginator.paginate(
             Bucket=self.the_bucket,
             Prefix=self.the_prefix)
 
-        print_status()
         for page in pages:
             if page['KeyCount'] == 0:
-                safe_print('No files found for prefix {}'
-                           .format(self.the_prefix),
-                           file=sys.stderr, status_refresh=False)
+                # no objects returned in the listing
                 break
 
-            if args.limit != 0 \
-                    and (counters['matches_count'].value() >= args.limit):
+            if max_result_limit_reached:
                 # limit reached. No more list results needed
+                self.handled = True
+                self.files_queue.put(_sentinel)
                 return
 
             if 'Contents' not in page:
-                return
+                continue
 
             for obj in page['Contents']:
                 # skip 0 bytes files as boto3 deserializer will throw exceptions
-                # for them
+                # for them and anyway there isn't anything useful in them
                 if obj['Size'] == 0:
                     continue
                 self.files_queue.put(obj['Key'])
-                counters['total_files'].inc()
+                total_files = total_files + 1
 
-            print_status()
+        self.handled = True
+        self.files_queue.put(_sentinel)
 
 
 class ScanOneKey(threading.Thread):
-    def __init__(self, the_bucket, the_key):
-
+    def __init__(self, the_bucket, files_queue, events_queue):
         threading.Thread.__init__(self)
         self.the_bucket = the_bucket
-        self.the_key = the_key
+        self.files_queue = files_queue
+        self.events_queue = events_queue
+        self.handled = False
 
     def run(self):
-        if args.limit != 0 and counters['matches_count'].value() \
-                >= args.limit:
-            return
-        key = self.the_key
-        input_ser = {'JSON': {"Type": "Document"}}
-        output_ser = {'JSON': {}}
-        if args.delim is not None:
-            input_ser = {'CSV': {"FieldDelimiter": args.delim,
-                                 "FileHeaderInfo": "NONE"}}
-            output_ser = {'CSV': {"FieldDelimiter": args.delim}}
-
-        if args.count:
-            # no need to parse JSON if we are only expecting the count of rows
-            output_ser = {'CSV': {"FieldDelimiter": " "}}
-
-        query = "SELECT "
-
-        if args.count:
-            query += "count(*) "
-        elif args.output_fields:
-            query += args.output_fields + " "
-        else:
-            query += "* "
-
-        query += "FROM s3object s "
-
-        if args.where is not None:
-            query += "WHERE " + args.where
-
-        if args.limit != 0:
-            query += " LIMIT " + str(args.limit)
-
-        if '.gz' == key.lower()[-3:]:
-            input_ser['CompressionType'] = 'GZIP'
-
         while True:
-            try:
-                r = s3.select_object_content(
-                    Bucket=self.the_bucket,
-                    Key=self.the_key,
-                    ExpressionType='SQL',
-                    Expression=query,
-                    InputSerialization=input_ser,
-                    OutputSerialization=output_ser,
-                )
-                break
-            except (EndpointConnectionError, ClientError) as e:
-                counters['failed_requests'].inc()
-                safe_print('Exception caught when querying {}: {}'
-                           .format(self.the_key, str(e)),
-                           file=sys.stderr)
-
-                time.sleep(0.4)
-
-        for event in r['Payload']:
-            if args.limit != 0 and counters['matches_count'].value() \
-                    >= args.limit:
-                # requested limit reached
+            s3_key = self.files_queue.get()
+            if max_result_limit_reached:
+                self.handled = True
+                # always add empty message to prevent queue.get from blocking
+                # indefinitely
+                self.events_queue.put(S3SelectEventResult(0, 0, 0, [], None))
                 return
-            if 'Records' in event:
-                records = event['Records']['Payload'].decode('utf-8')
-                if args.limit != 0:
-                    counters['matches_count'].print_and_inc(records, args.limit)
-                else:
-                    if args.count:
-                        counters['matches_count'].inc(int(records))
-                    else:
-                        safe_print(records, end='')
-                        counters[
-                            'matches_count'].inc(len(records.split("\n")) - 1)
-            elif 'Stats' in event:
-                counters['bytes_scanned'].inc(
-                    event['Stats']['Details']['BytesScanned'])
-                counters['bytes_returned'].inc(
-                    event['Stats']['Details']['BytesReturned'])
+            if s3_key is _sentinel:
+                # put it back so that other consumers see it
+                self.files_queue.put(_sentinel)
+                self.handled = True
+                self.events_queue.put(S3SelectEventResult(0, 0, 0, [], None))
+                return
+            input_ser = {'JSON': {"Type": "Document"}}
+            output_ser = {'JSON': {}}
+            if args.delim is not None:
+                input_ser = {'CSV': {"FieldDelimiter": args.delim,
+                                     "FileHeaderInfo": "NONE"}}
+                output_ser = {'CSV': {"FieldDelimiter": args.delim}}
 
-        counters['files_processed'].inc()
-        print_status()
+            if args.count:
+                # no need to parse JSON if we are only expecting the count of
+                # rows
+                output_ser = {'CSV': {"FieldDelimiter": " "}}
 
+            query = "SELECT "
 
-class AtomicInteger:
-    def __init__(self, value=0):
-        self._value = value
-        self._lock = threading.Lock()
+            if args.count:
+                query += "count(*) "
+            elif args.output_fields:
+                query += args.output_fields + " "
+            else:
+                query += "* "
 
-    def inc(self, addition=1):
-        with self._lock:
-            self._value += addition
+            query += "FROM s3object s "
 
-    def print_and_inc(self, records, limit):
-        with self._lock:
-            for record in records.split("\n"):
-                if self.value() >= limit:
+            if args.where is not None:
+                query += "WHERE " + args.where
+
+            if args.limit != 0:
+                query += " LIMIT " + str(args.limit)
+
+            if '.gz' == s3_key.lower()[-3:]:
+                input_ser['CompressionType'] = 'GZIP'
+
+            while True:
+                try:
+                    r = s3.select_object_content(
+                        Bucket=self.the_bucket,
+                        Key=s3_key,
+                        ExpressionType='SQL',
+                        Expression=query,
+                        InputSerialization=input_ser,
+                        OutputSerialization=output_ser,
+                    )
+                    break
+                except (EndpointConnectionError, ClientError) as e:
+                    self.events_queue.put(S3SelectEventResult(0, 0, 0, [], e))
+                    time.sleep(0.4)
+
+            for event in r['Payload']:
+                if max_result_limit_reached:
+                    self.handled = True
+                    self.events_queue.put(
+                        S3SelectEventResult(0, 0, 0, [], None))
                     return
-                self._value += 1
-                safe_print(record)
 
-    def value(self):
-        return self._value
+                if 'Records' in event:
+                    records = event['Records']['Payload'].decode('utf-8')
+                    # remove last \n character
+                    records = records[:-1]
+                    self.events_queue.put(
+                        S3SelectEventResult(0, 0, 0, records.split("\n"), None))
+                elif 'Stats' in event:
+                    self.events_queue.put(
+                        S3SelectEventResult(
+                            event['Stats']['Details']['BytesReturned'],
+                            event['Stats']['Details']['BytesScanned'],
+                            0,
+                            [],
+                            None))
+
+            self.events_queue.put(S3SelectEventResult(0, 0, 1, [], None))
+
+
+class S3SelectEventResult:
+    def __init__(self, bytes_returned, bytes_scanned, files_processed, records,
+                 exception):
+        self.bytes_returned = bytes_returned
+        self.bytes_scanned = bytes_scanned
+        self.files_processed = files_processed
+        self.records = records
+        self.exception = exception
+
+    def __repr__(self):
+        return "Bytes_returned: " + str(self.bytes_returned) + " Records: " \
+               + str(self.records)
+
+
+def format_bytes(bytes_count):
+    if bytes_count < 10 ** 3:
+        return str(bytes_count) + " B"
+    elif bytes_count < 10 ** 6:
+        return str(bytes_count // 10 ** 3) + " KB"
+    elif bytes_count < 10 ** 9:
+        return str(bytes_count // 10 ** 6) + " MB"
+    else:
+        return str(bytes_count // 10 ** 9) + " GB"
+
+
+def refresh_status_bar(files_processed, records_matched, bytes_scanned):
+    if args.verbose:
+        print('\r\033[KFiles processed: {}/{}  Records matched: {}  '
+              'Bytes scanned: {}'
+              .format(files_processed, total_files, records_matched,
+                      format_bytes(bytes_scanned)),
+              file=sys.stderr, end="")
 
 
 def select():
+    global max_result_limit_reached
     url_parse = parse.urlparse(args.prefix)
     bucket = url_parse.netloc
     prefix = url_parse.path[1:]
 
     files_queue = queue.Queue(20000)
+    events_queue = queue.Queue(20000)
 
-    listing_thread = S3ListThread(bucket, prefix, files_queue)
-    listing_thread.start()
-    # issue all ScanOneKey requests
-    while ((args.limit == 0
-            or counters['matches_count'].value() < args.limit)
-           and (not files_queue.empty() or listing_thread.is_alive())
-           ):
+    threads = []
+    for x in range(0, args.thread_count):
+        if x == 0:
+            # we need only one listing thread
+            thread = S3ListThread(bucket, prefix, files_queue)
+        else:
+            thread = ScanOneKey(bucket, files_queue, events_queue)
 
-        if threading.active_count() > args.thread_count:
-            time.sleep(0.2)
-            continue
-        try:
-            ScanOneKey(bucket, files_queue.get(timeout=3)).start()
-        except queue.Empty:
-            # nothing. S3ListThread returned nothing. No keys with prefixes
-            # found
-            pass
+        # daemon threads allow for fast exit if max number of records has been
+        # specified
+        thread.daemon = True
+        thread.start()
+        threads.append(thread)
 
-    # wait until we process all files or reach limit
+    bytes_returned = 0
+    bytes_scanned = 0
+    files_processed = 0
+    records_matched = 0
+
     while True:
-        all_files_processed = counters['files_processed'].value() == counters[
-            'total_files'].value()
-        limit_reached = 0 < args.limit <= counters['matches_count'].value()
-        if all_files_processed or limit_reached:
+        threads = [t for t in threads if not t.handled]
+
+        if len(threads) == 0 and events_queue.qsize() == 0:
             break
 
-        time.sleep(0.1)
+        if max_result_limit_reached:
+            break
 
-    print_status(end="\n")
+        event = events_queue.get()
+
+        if event.exception is not None:
+            print('\r\033[K' + "Exception caught (will retry): " +
+                  str(event.exception), file=sys.stderr)
+
+        bytes_returned = bytes_returned + event.bytes_returned
+        bytes_scanned = bytes_scanned + event.bytes_scanned
+        files_processed = files_processed + event.files_processed
+
+        refresh_status_bar(files_processed, records_matched, bytes_scanned)
+
+        for record in event.records:
+            if args.count:
+                records_matched = records_matched + int(record)
+            else:
+                records_matched = records_matched + 1
+                print('\r\033[K' + record)
+                refresh_status_bar(files_processed, records_matched,
+                                   bytes_scanned)
+                if 0 < args.limit <= records_matched:
+                    max_result_limit_reached = True
+                    break
 
     if args.verbose:
-        price_for_bytes_scanned = 0.002 * counters['bytes_scanned'].value() / (
-            1024 ** 3)
-        price_for_bytes_returned = 0.0007 * counters[
-            'bytes_returned'].value() / (1024 ** 3)
-        price_for_requests = 0.0004 * counters['total_files'].value() / 1000
+        price_for_bytes_scanned = 0.002 * bytes_scanned / (
+                1024 ** 3)
+        price_for_bytes_returned = 0.0007 * bytes_returned / (1024 ** 3)
+        price_for_requests = 0.0004 * total_files / 1000
 
-        safe_print("Cost for data scanned: ${0:.2f}"
-                   .format(price_for_bytes_scanned), file=sys.stderr,
-                   status_refresh=False)
-        safe_print("Cost for data returned: ${0:.2f}"
-                   .format(price_for_bytes_returned), file=sys.stderr,
-                   status_refresh=False)
-        safe_print("Cost for SELECT requests: ${0:.2f}"
-                   .format(price_for_requests), file=sys.stderr,
-                   status_refresh=False)
-        safe_print("Total cost: ${0:.2f}"
-                   .format(price_for_bytes_scanned + price_for_bytes_returned +
-                           price_for_requests), file=sys.stderr,
-                   status_refresh=False)
+        refresh_status_bar(files_processed, records_matched, bytes_scanned)
+        print("\nCost for data scanned: ${0:.2f}"
+              .format(price_for_bytes_scanned), file=sys.stderr)
+        print("Cost for data returned: ${0:.2f}"
+              .format(price_for_bytes_returned), file=sys.stderr)
+        print("Cost for SELECT requests: ${0:.2f}"
+              .format(price_for_requests), file=sys.stderr)
+        total_cost = price_for_bytes_scanned + price_for_bytes_returned \
+                     + price_for_requests
+        print("Total cost: ${0:.2f}".format(total_cost), file=sys.stderr)
 
 
 if __name__ == "__main__":
@@ -278,23 +288,15 @@ if __name__ == "__main__":
                    help="Only count records without printing them to stdout")
     a.add_argument("-o", "--output_fields",
                    help="What fields or columns to output")
-    a.add_argument("-t", "--thread_count", type=int, default=200,
+    a.add_argument("-t", "--thread_count", type=int, default=150,
                    help="How many threads to use when executing s3_select api "
-                        "requests. Default of 200 seems to be max that doesn't "
-                        "cause throttling on AWS side")
+                        "requests. Default of 150 seems to be on safe side. "
+                        "If you increase this there is a chance you'll need "
+                        "also to increase nr of open files on your OS")
     a.add_argument("--profile",
                    help="Use a specific profile from your credential file.")
 
     args = a.parse_args()
-
-    counters = {
-        "total_files": AtomicInteger(),
-        "matches_count": AtomicInteger(),
-        "files_processed": AtomicInteger(),
-        "bytes_returned": AtomicInteger(),
-        "bytes_scanned": AtomicInteger(),
-        "failed_requests": AtomicInteger()
-    }
 
     if args.prefix is None:
         a.print_help()
