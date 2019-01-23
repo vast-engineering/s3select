@@ -46,15 +46,17 @@ s3select uses the same authentication and endpoint configuration as [aws-cli](ht
 First get some help:
 <pre>
 $ s3select -h
-usage: s3select [-h] [-p PREFIX] [-w WHERE] [-d DELIM] [-l LIMIT] [-v] [-D]
-                [-c] [-o OUTPUT_FIELDS] [-t THREAD_COUNT]
+usage: s3select [-h] [-w WHERE] [-d DELIM] [-l LIMIT] [-v] [-c]
+                [-o OUTPUT_FIELDS] [-t THREAD_COUNT] [--profile PROFILE]
+                prefix
 
 s3select makes s3 select querying API much easier and faster
 
+positional arguments:
+  prefix                S3 prefix beneath which all files are queried
+
 optional arguments:
   -h, --help            show this help message and exit
-  -p PREFIX, --prefix PREFIX
-                        S3 prefix beneath which all files are queried
   -w WHERE, --where WHERE
                         WHERE part of the SQL query
   -d DELIM, --delim DELIM
@@ -63,20 +65,20 @@ optional arguments:
   -l LIMIT, --limit LIMIT
                         Maximum number of results to return
   -v, --verbose         Be more verbose
-  -D, --disable_progress
-                        Turn off progress line
   -c, --count           Only count records without printing them to stdout
   -o OUTPUT_FIELDS, --output_fields OUTPUT_FIELDS
                         What fields or columns to output
   -t THREAD_COUNT, --thread_count THREAD_COUNT
                         How many threads to use when executing s3_select api
-                        requests. Default of 200 seems to be max that doesn't
-                        cause throttling on AWS side
+                        requests. Default of 150 seems to be on safe side. If
+                        you increase this there is a chance you'll need also
+                        to increase nr of open files on your OS
+  --profile PROFILE     Use a specific AWS profile from your credential file.
 </pre>
 
 It's always useful to peek at first few lines of input files to figure out contents:
 <pre>
-$ s3select -p s3://testing.bucket/json_example/ -l 3
+$ s3select -l 3 s3://testing.bucket/json_example/
 {"name":"Gilbert","wins":[["straight","7♣"],["one pair","10♥"]]}
 {"name":"Alexa","wins":[["two pair","4♠"],["two pair","9♠"]]}
 {"name":"May","wins":[]}
@@ -84,19 +86,19 @@ Files processed: 0/1  Records matched: 3  Failed requests: 0</pre>
 
 It's JSON. Great - that's s3select default format. Let's get a subset of its data
 <pre>
-$ s3select -p s3://testing.bucket/json_example -l 3 -w "s.name LIKE '%Gil%'" -o "s.wins"
+$ s3select -l 3 -w "s.name LIKE '%Gil%'" -o "s.wins" s3://testing.bucket/json_example
 {"wins":[["straight","7♣"],["one pair","10♥"]]}
 Files processed: 1/1  Records matched: 1  Failed requests: 0
 </pre>
 
 What if the input is not in JSON:
 <pre>
-$ s3select -p s3://testing.bucket/csv_example -l 3
+$ s3select -l 3 s3://testing.bucket/csv_example
 Exception caught when querying csv_example/example.csv: An error occurred (JSONParsingError) when calling the SelectObjectContent operation: Error parsing JSON file. Please check the file and try again.
 </pre>
 Exception means input isn't parsable JSON. Let's switch to CSV file delimited with `,` but you can specify any other delimiter char. Often used is `TAB` specified with `\\t` 
 <pre>
-$ s3select -p s3://testing.bucket/csv_example -l 3 -d ,
+$ s3select -l 3 -d , s3://testing.bucket/csv_example
 Gilbert,straight,7♣,one pair,10♥
 Alexa,two pair,4♠,two pair,9♠
 May,,,,
@@ -105,7 +107,7 @@ Files processed: 0/1  Records matched: 3  Failed requests: 0
 
 Since utilising the first line of CSV as a header isn't yet supported we'll select a subset of data using column enumeration:   
 <pre>
-$ s3select -p s3://testing.bucket/csv_example -l 3 -d , -w "s._1 LIKE '%i%'" -o "s._2"
+$ s3select -l 3 -d , -w "s._1 LIKE '%i%'" -o "s._2" s3://testing.bucket/csv_example
 straight
 three of a kind
 Files processed: 0/1  Records matched: 2  Failed requests: 0
@@ -113,7 +115,7 @@ Files processed: 0/1  Records matched: 2  Failed requests: 0
 
 If you are interested in pricing for your requests, add `-v` to increase verbosity which will include pricing information at the end:
 <pre>
-$ s3select -p s3://testing.bucket/10G_sample -v -c
+$ s3select -v -c s3://testing.bucket/10G_sample
 Files processed: 77/77  Records matched: 5696395  Failed requests: 0
 Cost for data scanned: $0.02
 Cost for data returned: $0.00
