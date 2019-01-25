@@ -17,17 +17,18 @@ total_files = 0
 
 
 class S3ListThread(threading.Thread):
-    def __init__(self, bucket, s3_prefix, files_queue):
+    def __init__(self, bucket, s3_prefix, files_queue, s3):
 
         threading.Thread.__init__(self)
         self.the_bucket = bucket
         self.the_prefix = s3_prefix
         self.files_queue = files_queue
         self.handled = False
+        self.s3 = s3
 
     def run(self):
         global total_files
-        paginator = s3.get_paginator('list_objects_v2')
+        paginator = self.s3.get_paginator('list_objects_v2')
         pages = paginator.paginate(
             Bucket=self.the_bucket,
             Prefix=self.the_prefix)
@@ -59,12 +60,20 @@ class S3ListThread(threading.Thread):
 
 
 class ScanOneKey(threading.Thread):
-    def __init__(self, the_bucket, files_queue, events_queue):
+    def __init__(
+            self, the_bucket, files_queue, events_queue, s3, output_fields=None,
+            count=None, delimiter=None, where=None, limit=None):
         threading.Thread.__init__(self)
+        self.limit = limit
+        self.where = where
+        self.delimiter = delimiter
+        self.count = count
+        self.output_fields = output_fields
         self.the_bucket = the_bucket
         self.files_queue = files_queue
         self.events_queue = events_queue
         self.handled = False
+        self.s3 = s3
 
     def run(self):
         while True:
@@ -83,39 +92,38 @@ class ScanOneKey(threading.Thread):
                 return
             input_ser = {'JSON': {"Type": "Document"}}
             output_ser = {'JSON': {}}
-            if args.delim is not None:
-                input_ser = {'CSV': {"FieldDelimiter": args.delim,
+            if self.delimiter is not None:
+                input_ser = {'CSV': {"FieldDelimiter": self.delimiter,
                                      "FileHeaderInfo": "NONE"}}
-                output_ser = {'CSV': {"FieldDelimiter": args.delim}}
+                output_ser = {'CSV': {"FieldDelimiter": self.delimiter}}
 
-            if args.count:
+            if self.count:
                 # no need to parse JSON if we are only expecting the count of
                 # rows
                 output_ser = {'CSV': {"FieldDelimiter": " "}}
 
             query = "SELECT "
-
-            if args.count:
+            if self.count:
                 query += "count(*) "
-            elif args.output_fields:
-                query += args.output_fields + " "
+            elif self.output_fields is not None:
+                query += self.output_fields + " "
             else:
                 query += "* "
 
             query += "FROM s3object s "
 
-            if args.where is not None:
-                query += "WHERE " + args.where
+            if self.where is not None:
+                query += "WHERE " + self.where
 
-            if args.limit != 0:
-                query += " LIMIT " + str(args.limit)
+            if self.limit > 0:
+                query += " LIMIT " + str(self.limit)
 
             if '.gz' == s3_key.lower()[-3:]:
                 input_ser['CompressionType'] = 'GZIP'
 
             while True:
                 try:
-                    r = s3.select_object_content(
+                    r = self.s3.select_object_content(
                         Bucket=self.the_bucket,
                         Key=s3_key,
                         ExpressionType='SQL',
@@ -178,8 +186,9 @@ def format_bytes(bytes_count):
         return str(bytes_count // 10 ** 9) + " GB"
 
 
-def refresh_status_bar(files_processed, records_matched, bytes_scanned):
-    if args.verbose:
+def refresh_status_bar(
+        files_processed, records_matched, bytes_scanned, verbose):
+    if verbose:
         print('\r\033[KFiles processed: {}/{}  Records matched: {}  '
               'Bytes scanned: {}'
               .format(files_processed, total_files, records_matched,
@@ -187,22 +196,39 @@ def refresh_status_bar(files_processed, records_matched, bytes_scanned):
               file=sys.stderr, end="")
 
 
-def select():
+def select(prefix=None, verbose=False, profile=None, thread_count=150,
+           count=False, limit=0, output_fields=None, delimiter=None,
+           where=None):
+
+    if prefix is None:
+        raise Exception("S3 path prefix must be defined")
+
+    # shortcut as specifying \t from command line is bit tricky with all escapes
+    if delimiter is not None and "\\t" in delimiter:
+        delimiter = '\t'
+
+    if profile is not None:
+        boto3.setup_default_session(profile_name=profile)
+
+    s3 = boto3.client('s3')
+
     global max_result_limit_reached
-    url_parse = parse.urlparse(args.prefix)
+    url_parse = parse.urlparse(prefix)
     bucket = url_parse.netloc
-    prefix = url_parse.path[1:]
+    key_prefix = url_parse.path[1:]
 
     files_queue = queue.Queue(20000)
     events_queue = queue.Queue(20000)
 
     threads = []
-    for x in range(0, args.thread_count):
+    for x in range(0, thread_count):
         if x == 0:
             # we need only one listing thread
-            thread = S3ListThread(bucket, prefix, files_queue)
+            thread = S3ListThread(bucket, key_prefix, files_queue, s3)
         else:
-            thread = ScanOneKey(bucket, files_queue, events_queue)
+            thread = ScanOneKey(
+                bucket, files_queue, events_queue, s3, count=count, limit=limit,
+                output_fields=output_fields, delimiter=delimiter, where=where)
 
         # daemon threads allow for fast exit if max number of records has been
         # specified
@@ -234,27 +260,29 @@ def select():
         bytes_scanned = bytes_scanned + event.bytes_scanned
         files_processed = files_processed + event.files_processed
 
-        refresh_status_bar(files_processed, records_matched, bytes_scanned)
+        refresh_status_bar(
+            files_processed, records_matched, bytes_scanned, verbose)
 
         for record in event.records:
-            if args.count:
+            if count:
                 records_matched = records_matched + int(record)
             else:
                 records_matched = records_matched + 1
                 print('\r\033[K' + record)
-                refresh_status_bar(files_processed, records_matched,
-                                   bytes_scanned)
-                if 0 < args.limit <= records_matched:
+                refresh_status_bar(
+                    files_processed, records_matched, bytes_scanned, verbose)
+                if 0 < limit <= records_matched:
                     max_result_limit_reached = True
                     break
 
-    if args.verbose:
+    if verbose:
         price_for_bytes_scanned = 0.002 * bytes_scanned / (
                 1024 ** 3)
         price_for_bytes_returned = 0.0007 * bytes_returned / (1024 ** 3)
         price_for_requests = 0.0004 * total_files / 1000
 
-        refresh_status_bar(files_processed, records_matched, bytes_scanned)
+        refresh_status_bar(
+            files_processed, records_matched, bytes_scanned, verbose)
         print("\nCost for data scanned: ${0:.2f}"
               .format(price_for_bytes_scanned), file=sys.stderr)
         print("Cost for data returned: ${0:.2f}"
@@ -283,7 +311,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "-d",
-        "--delim",
+        "--delimiter",
         help="Delimiter to be used for CSV files. If specified CSV parsing will"
              " be used. By default we expect JSON input"
     )
@@ -327,13 +355,4 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-
-    if args.delim is not None and "\\t" in args.delim:
-        args.delim = '\t'
-
-    if args.profile is not None:
-        boto3.setup_default_session(profile_name=args.profile)
-
-    s3 = boto3.client('s3')
-
-    select()
+    select(**vars(args))
