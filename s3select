@@ -9,7 +9,6 @@ from six.moves import queue
 import threading
 import sys
 import time
-from botocore.exceptions import EndpointConnectionError, ClientError
 
 _sentinel = object()
 max_result_limit_reached = False
@@ -67,8 +66,9 @@ class S3ListThread(threading.Thread):
 class ScanOneKey(threading.Thread):
     def __init__(
             self, files_queue, events_queue, s3, output_fields=None, count=None,
-            delimiter=None, where=None, limit=None):
+            delimiter=None, where=None, limit=None, max_retries=None):
         threading.Thread.__init__(self)
+        self.max_retries = max_retries
         self.limit = limit
         self.where = where
         self.delimiter = delimiter
@@ -87,13 +87,13 @@ class ScanOneKey(threading.Thread):
                 self.handled = True
                 # always add empty message to prevent queue.get from blocking
                 # indefinitely
-                self.events_queue.put(S3SelectEventResult(0, 0, 0, [], None))
+                self.events_queue.put(S3SelectEventResult())
                 return
             if bucket is _sentinel:
                 # put it back so that other consumers see it
                 self.files_queue.put((_sentinel, None))
                 self.handled = True
-                self.events_queue.put(S3SelectEventResult(0, 0, 0, [], None))
+                self.events_queue.put(S3SelectEventResult())
                 return
             input_ser = {'JSON': {"Type": "Document"}}
             output_ser = {'JSON': {}}
@@ -126,6 +126,7 @@ class ScanOneKey(threading.Thread):
             if '.gz' == s3_key.lower()[-3:]:
                 input_ser['CompressionType'] = 'GZIP'
 
+            current_try = 0
             while True:
                 try:
                     r = self.s3.select_object_content(
@@ -137,15 +138,18 @@ class ScanOneKey(threading.Thread):
                         OutputSerialization=output_ser,
                     )
                     break
-                except (EndpointConnectionError, ClientError) as e:
-                    self.events_queue.put(S3SelectEventResult(0, 0, 0, [], e))
+                except Exception as e:
+                    self.events_queue.put(S3SelectEventResult(
+                        exception=e,
+                        max_retries_reached=current_try >= self.max_retries))
                     time.sleep(0.4)
+                    current_try = current_try + 1
 
             for event in r['Payload']:
                 if max_result_limit_reached:
                     self.handled = True
                     self.events_queue.put(
-                        S3SelectEventResult(0, 0, 0, [], None))
+                        S3SelectEventResult())
                     return
 
                 if 'Records' in event:
@@ -153,31 +157,27 @@ class ScanOneKey(threading.Thread):
                     # remove last \n character
                     records = records[:-1]
                     self.events_queue.put(
-                        S3SelectEventResult(0, 0, 0, records.split("\n"), None))
+                        S3SelectEventResult(records=records.split("\n")))
                 elif 'Stats' in event:
                     self.events_queue.put(
                         S3SelectEventResult(
+                            bytes_returned=
                             event['Stats']['Details']['BytesReturned'],
-                            event['Stats']['Details']['BytesScanned'],
-                            0,
-                            [],
-                            None))
+                            bytes_scanned=
+                            event['Stats']['Details']['BytesScanned']))
 
-            self.events_queue.put(S3SelectEventResult(0, 0, 1, [], None))
+            self.events_queue.put(S3SelectEventResult(files_processed=1))
 
 
 class S3SelectEventResult:
-    def __init__(self, bytes_returned, bytes_scanned, files_processed, records,
-                 exception):
+    def __init__(self, bytes_returned=0, bytes_scanned=0, files_processed=0,
+                 records=(), exception=None, max_retries_reached=False):
         self.bytes_returned = bytes_returned
         self.bytes_scanned = bytes_scanned
         self.files_processed = files_processed
         self.records = records
         self.exception = exception
-
-    def __repr__(self):
-        return "Bytes_returned: " + str(self.bytes_returned) + " Records: " \
-               + str(self.records)
+        self.max_retries_reached = max_retries_reached
 
 
 def format_bytes(bytes_count):
@@ -203,8 +203,7 @@ def refresh_status_bar(
 
 def select(prefixes=None, verbose=False, profile=None, thread_count=150,
            count=False, limit=0, output_fields=None, delimiter=None,
-           where=None):
-
+           where=None, max_retries=20):
     if prefixes is None:
         raise Exception("S3 path prefix must be defined")
 
@@ -230,7 +229,8 @@ def select(prefixes=None, verbose=False, profile=None, thread_count=150,
         else:
             thread = ScanOneKey(
                 files_queue, events_queue, s3, count=count, limit=limit,
-                output_fields=output_fields, delimiter=delimiter, where=where)
+                output_fields=output_fields, delimiter=delimiter, where=where,
+                max_retries=max_retries)
 
         # daemon threads allow for fast exit if max number of records has been
         # specified
@@ -255,8 +255,11 @@ def select(prefixes=None, verbose=False, profile=None, thread_count=150,
         event = events_queue.get()
 
         if event.exception is not None:
-            print('\r\033[K' + "Exception caught (will retry): " +
-                  str(event.exception), file=sys.stderr)
+            if event.max_retries_reached:
+                raise event.exception
+            elif verbose:
+                print('\r\033[K' + "Exception caught (will retry): " +
+                      str(event.exception), file=sys.stderr)
 
         bytes_returned = bytes_returned + event.bytes_returned
         bytes_scanned = bytes_scanned + event.bytes_scanned
@@ -297,7 +300,6 @@ def select(prefixes=None, verbose=False, profile=None, thread_count=150,
 
 
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser(
         description='s3select makes s3 select querying API much easier and '
                     'faster'
@@ -355,6 +357,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--profile",
         help="Use a specific AWS profile from your credential file."
+    )
+    parser.add_argument(
+        "-M",
+        "--max_retries",
+        type=int,
+        default=20,
+        help="Maximum number of retries per queried S3 object in case API "
+             "request fails"
     )
 
     args = parser.parse_args()

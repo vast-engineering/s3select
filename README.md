@@ -46,6 +46,11 @@ s3select uses the same authentication and endpoint configuration as [aws-cli](ht
 First get some help:
 <pre>
 $ s3select -h
+usage: s3select [-h] [-w WHERE] [-d DELIMITER] [-l LIMIT] [-v] [-c]
+                [-o OUTPUT_FIELDS] [-t THREAD_COUNT] [--profile PROFILE]
+                [-M MAX_RETRIES]
+                prefixes [prefixes ...]
+
 s3select makes s3 select querying API much easier and faster
 
 positional arguments:
@@ -71,6 +76,9 @@ optional arguments:
                         you increase this there is a chance you'll need also
                         to increase nr of open files on your OS
   --profile PROFILE     Use a specific AWS profile from your credential file.
+  -M MAX_RETRIES, --max_retries MAX_RETRIES
+                        Maximum number of retries per queried S3 object in
+                        case API request fails
 </pre>
 
 It's always useful to peek at first few lines of input files to figure out contents:
