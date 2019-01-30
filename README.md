@@ -14,7 +14,7 @@ Unfortunately, S3 select API query call is limited to only one file on S3 and sy
 
 ### Features at a glance
 Most important features:
- 1) Queries all files beneath given S3 prefix
+ 1) Queries all files beneath given S3 prefix(es)
  2) The whole process is multi-threaded and fast. A scan of 1.1TB of data in stored in 20,000 files takes 5 minutes). Threads don't slow down client much as heavy lifting is done on AWS.
  3) The compression of the file is automatically inferred for you by picking GZIP or plain text depending on file extension. 
  4) Real-time execution progress display.
@@ -46,20 +46,17 @@ s3select uses the same authentication and endpoint configuration as [aws-cli](ht
 First get some help:
 <pre>
 $ s3select -h
-usage: s3select [-h] [-w WHERE] [-d DELIM] [-l LIMIT] [-v] [-c]
-                [-o OUTPUT_FIELDS] [-t THREAD_COUNT] [--profile PROFILE]
-                prefix
-
 s3select makes s3 select querying API much easier and faster
 
 positional arguments:
-  prefix                S3 prefix beneath which all files are queried
+  prefixes              S3 prefix (or more) beneath which all files are
+                        queried
 
 optional arguments:
   -h, --help            show this help message and exit
   -w WHERE, --where WHERE
                         WHERE part of the SQL query
-  -d DELIM, --delim DELIM
+  -d DELIMITER, --delimiter DELIMITER
                         Delimiter to be used for CSV files. If specified CSV
                         parsing will be used. By default we expect JSON input
   -l LIMIT, --limit LIMIT
@@ -81,14 +78,12 @@ It's always useful to peek at first few lines of input files to figure out conte
 $ s3select -l 3 s3://testing.bucket/json_example/
 {"name":"Gilbert","wins":[["straight","7♣"],["one pair","10♥"]]}
 {"name":"Alexa","wins":[["two pair","4♠"],["two pair","9♠"]]}
-{"name":"May","wins":[]}
-Files processed: 0/1  Records matched: 3  Failed requests: 0</pre>
+{"name":"May","wins":[]}</pre>
 
 It's JSON. Great - that's s3select default format. Let's get a subset of its data
 <pre>
 $ s3select -l 3 -w "s.name LIKE '%Gil%'" -o "s.wins" s3://testing.bucket/json_example
 {"wins":[["straight","7♣"],["one pair","10♥"]]}
-Files processed: 1/1  Records matched: 1  Failed requests: 0
 </pre>
 
 What if the input is not in JSON:
@@ -102,7 +97,6 @@ $ s3select -l 3 -d , s3://testing.bucket/csv_example
 Gilbert,straight,7♣,one pair,10♥
 Alexa,two pair,4♠,two pair,9♠
 May,,,,
-Files processed: 0/1  Records matched: 3  Failed requests: 0
 </pre>
 
 Since utilising the first line of CSV as a header isn't yet supported we'll select a subset of data using column enumeration:   
@@ -110,13 +104,12 @@ Since utilising the first line of CSV as a header isn't yet supported we'll sele
 $ s3select -l 3 -d , -w "s._1 LIKE '%i%'" -o "s._2" s3://testing.bucket/csv_example
 straight
 three of a kind
-Files processed: 0/1  Records matched: 2  Failed requests: 0
 </pre>
 
 If you are interested in pricing for your requests, add `-v` to increase verbosity which will include pricing information at the end:
 <pre>
 $ s3select -v -c s3://testing.bucket/10G_sample
-Files processed: 77/77  Records matched: 5696395  Failed requests: 0
+Files processed: 77/77  Records matched: 5696395  Bytes scanned: 21 GB
 Cost for data scanned: $0.02
 Cost for data returned: $0.00
 Cost for SELECT requests: $0.00
