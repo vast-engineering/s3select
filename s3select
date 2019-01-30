@@ -17,59 +17,63 @@ total_files = 0
 
 
 class S3ListThread(threading.Thread):
-    def __init__(self, bucket, s3_prefix, files_queue, s3):
+    def __init__(self, s3_prefixes, files_queue, s3):
 
         threading.Thread.__init__(self)
-        self.the_bucket = bucket
-        self.the_prefix = s3_prefix
+        self.s3_prefixes = s3_prefixes
         self.files_queue = files_queue
         self.handled = False
         self.s3 = s3
 
     def run(self):
-        global total_files
-        paginator = self.s3.get_paginator('list_objects_v2')
-        pages = paginator.paginate(
-            Bucket=self.the_bucket,
-            Prefix=self.the_prefix)
+        for prefix in self.s3_prefixes:
+            url_parse = parse.urlparse(prefix)
+            bucket = url_parse.netloc
+            key_prefix = url_parse.path[1:]
 
-        for page in pages:
-            if page['KeyCount'] == 0:
-                # no objects returned in the listing
-                break
+            global total_files
+            paginator = self.s3.get_paginator('list_objects_v2')
+            pages = paginator.paginate(
+                Bucket=bucket,
+                Prefix=key_prefix)
 
-            if max_result_limit_reached:
-                # limit reached. No more list results needed
-                self.handled = True
-                self.files_queue.put(_sentinel)
-                return
+            for page in pages:
+                if page['KeyCount'] == 0:
+                    # no objects returned in the listing
+                    break
 
-            if 'Contents' not in page:
-                continue
+                if max_result_limit_reached:
+                    # limit reached. No more list results needed
+                    self.handled = True
+                    self.files_queue.put((_sentinel, None))
+                    return
 
-            for obj in page['Contents']:
-                # skip 0 bytes files as boto3 deserializer will throw exceptions
-                # for them and anyway there isn't anything useful in them
-                if obj['Size'] == 0:
+                if 'Contents' not in page:
                     continue
-                self.files_queue.put(obj['Key'])
-                total_files = total_files + 1
+
+                for obj in page['Contents']:
+                    # skip 0 bytes files as boto3 deserializer will throw
+                    # exceptions for them and anyway there isn't anything useful
+                    # in them
+                    if obj['Size'] == 0:
+                        continue
+                    self.files_queue.put((bucket, obj['Key']))
+                    total_files = total_files + 1
 
         self.handled = True
-        self.files_queue.put(_sentinel)
+        self.files_queue.put((_sentinel, None))
 
 
 class ScanOneKey(threading.Thread):
     def __init__(
-            self, the_bucket, files_queue, events_queue, s3, output_fields=None,
-            count=None, delimiter=None, where=None, limit=None):
+            self, files_queue, events_queue, s3, output_fields=None, count=None,
+            delimiter=None, where=None, limit=None):
         threading.Thread.__init__(self)
         self.limit = limit
         self.where = where
         self.delimiter = delimiter
         self.count = count
         self.output_fields = output_fields
-        self.the_bucket = the_bucket
         self.files_queue = files_queue
         self.events_queue = events_queue
         self.handled = False
@@ -77,16 +81,17 @@ class ScanOneKey(threading.Thread):
 
     def run(self):
         while True:
-            s3_key = self.files_queue.get()
+            bucket, s3_key = self.files_queue.get()
+
             if max_result_limit_reached:
                 self.handled = True
                 # always add empty message to prevent queue.get from blocking
                 # indefinitely
                 self.events_queue.put(S3SelectEventResult(0, 0, 0, [], None))
                 return
-            if s3_key is _sentinel:
+            if bucket is _sentinel:
                 # put it back so that other consumers see it
-                self.files_queue.put(_sentinel)
+                self.files_queue.put((_sentinel, None))
                 self.handled = True
                 self.events_queue.put(S3SelectEventResult(0, 0, 0, [], None))
                 return
@@ -124,7 +129,7 @@ class ScanOneKey(threading.Thread):
             while True:
                 try:
                     r = self.s3.select_object_content(
-                        Bucket=self.the_bucket,
+                        Bucket=bucket,
                         Key=s3_key,
                         ExpressionType='SQL',
                         Expression=query,
@@ -196,11 +201,11 @@ def refresh_status_bar(
               file=sys.stderr, end="")
 
 
-def select(prefix=None, verbose=False, profile=None, thread_count=150,
+def select(prefixes=None, verbose=False, profile=None, thread_count=150,
            count=False, limit=0, output_fields=None, delimiter=None,
            where=None):
 
-    if prefix is None:
+    if prefixes is None:
         raise Exception("S3 path prefix must be defined")
 
     # shortcut as specifying \t from command line is bit tricky with all escapes
@@ -213,9 +218,6 @@ def select(prefix=None, verbose=False, profile=None, thread_count=150,
     s3 = boto3.client('s3')
 
     global max_result_limit_reached
-    url_parse = parse.urlparse(prefix)
-    bucket = url_parse.netloc
-    key_prefix = url_parse.path[1:]
 
     files_queue = queue.Queue(20000)
     events_queue = queue.Queue(20000)
@@ -224,10 +226,10 @@ def select(prefix=None, verbose=False, profile=None, thread_count=150,
     for x in range(0, thread_count):
         if x == 0:
             # we need only one listing thread
-            thread = S3ListThread(bucket, key_prefix, files_queue, s3)
+            thread = S3ListThread(prefixes, files_queue, s3)
         else:
             thread = ScanOneKey(
-                bucket, files_queue, events_queue, s3, count=count, limit=limit,
+                files_queue, events_queue, s3, count=count, limit=limit,
                 output_fields=output_fields, delimiter=delimiter, where=where)
 
         # daemon threads allow for fast exit if max number of records has been
@@ -301,8 +303,9 @@ if __name__ == "__main__":
                     'faster'
     )
     parser.add_argument(
-        "prefix",
-        help="S3 prefix beneath which all files are queried"
+        "prefixes",
+        nargs='+',
+        help="S3 prefix (or more) beneath which all files are queried"
     )
     parser.add_argument(
         "-w",
