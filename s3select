@@ -273,7 +273,9 @@ def select(prefixes=None, verbose=False, profile=None, thread_count=150,
                 records_matched = records_matched + int(record)
             else:
                 records_matched = records_matched + 1
-                print('\r\033[K' + record)
+                if verbose:
+                    print('\r\033[K', file=sys.stderr)
+                print(record)
                 refresh_status_bar(
                     files_processed, records_matched, bytes_scanned, verbose)
                 if 0 < limit <= records_matched:
@@ -281,7 +283,10 @@ def select(prefixes=None, verbose=False, profile=None, thread_count=150,
                     break
 
     if count:
-        print('\r\033[K' + str(records_matched))
+        if verbose:
+            print('\r\033[K', file=sys.stderr)
+
+        print(records_matched)
 
     if verbose:
         price_for_bytes_scanned = 0.002 * bytes_scanned / (
