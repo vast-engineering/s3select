@@ -280,6 +280,9 @@ def select(prefixes=None, verbose=False, profile=None, thread_count=150,
                     max_result_limit_reached = True
                     break
 
+    if count:
+        print(records_matched)
+
     if verbose:
         price_for_bytes_scanned = 0.002 * bytes_scanned / (
                 1024 ** 3)
