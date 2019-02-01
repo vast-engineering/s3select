@@ -3,7 +3,7 @@ import setuptools
 
 setuptools.setup(
     name='s3select',
-    version='0.0.9',
+    version='0.0.10',
     scripts=['s3select'],
     author="Marko Baštovanović",
     author_email="marko.bast@gmail.com",
