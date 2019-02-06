@@ -146,6 +146,7 @@ class ScanOneKey(threading.Thread):
                     current_try = current_try + 1
 
             payload_from_previous_event = ""
+            end_event_received = False
             for event in response['Payload']:
                 if max_result_limit_reached:
                     self.handled = True
@@ -168,8 +169,17 @@ class ScanOneKey(threading.Thread):
                             event['Stats']['Details']['BytesReturned'],
                             bytes_scanned=
                             event['Stats']['Details']['BytesScanned']))
+                elif 'End' in event:
+                    end_event_received = True
 
-            self.events_queue.put(S3SelectEventResult(files_processed=1))
+            if end_event_received:
+                self.events_queue.put(S3SelectEventResult(files_processed=1))
+            else:
+                self.events_queue.put(S3SelectEventResult(
+                    exception=Exception(
+                        "End event not received data is corrupted. Please "
+                        "retry"),
+                    max_retries_reached=True))
 
 
 class S3SelectEventResult:
@@ -287,7 +297,7 @@ def select(prefixes=None, verbose=False, profile=None, thread_count=150,
 
     if count:
         if verbose:
-            print('\r\033[K', file=sys.stderr)
+            print('\r\033[K', file=sys.stderr, end="")
 
         print(records_matched)
 
