@@ -129,7 +129,7 @@ class ScanOneKey(threading.Thread):
             current_try = 0
             while True:
                 try:
-                    r = self.s3.select_object_content(
+                    response = self.s3.select_object_content(
                         Bucket=bucket,
                         Key=s3_key,
                         ExpressionType='SQL',
@@ -145,7 +145,8 @@ class ScanOneKey(threading.Thread):
                     time.sleep(0.4)
                     current_try = current_try + 1
 
-            for event in r['Payload']:
+            payload_from_previous_event = ""
+            for event in response['Payload']:
                 if max_result_limit_reached:
                     self.handled = True
                     self.events_queue.put(
@@ -153,11 +154,13 @@ class ScanOneKey(threading.Thread):
                     return
 
                 if 'Records' in event:
-                    records = event['Records']['Payload'].decode('utf-8')
-                    # remove last \n character
-                    records = records[:-1]
+                    records = payload_from_previous_event + \
+                              event['Records']['Payload'].decode('utf-8')
+                    split_records = records.split("\n")
+                    # last "record" is either "\n" or partial record
+                    payload_from_previous_event = split_records[-1]
                     self.events_queue.put(
-                        S3SelectEventResult(records=records.split("\n")))
+                        S3SelectEventResult(records=split_records[:-1]))
                 elif 'Stats' in event:
                     self.events_queue.put(
                         S3SelectEventResult(
