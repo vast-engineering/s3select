@@ -82,6 +82,7 @@ class ScanOneKey(threading.Thread):
     def run(self):
         while True:
             bucket, s3_key = self.files_queue.get()
+            s3_path = "s3://{}/{}".format(bucket, s3_key)
 
             if max_result_limit_reached:
                 self.handled = True
@@ -161,7 +162,8 @@ class ScanOneKey(threading.Thread):
                     # last "record" is either "\n" or partial record
                     payload_from_previous_event = split_records[-1]
                     self.events_queue.put(
-                        S3SelectEventResult(records=split_records[:-1]))
+                        S3SelectEventResult(
+                            records=split_records[:-1], s3_path=s3_path))
                 elif 'Stats' in event:
                     self.events_queue.put(
                         S3SelectEventResult(
@@ -184,13 +186,15 @@ class ScanOneKey(threading.Thread):
 
 class S3SelectEventResult:
     def __init__(self, bytes_returned=0, bytes_scanned=0, files_processed=0,
-                 records=(), exception=None, max_retries_reached=False):
+                 records=(), exception=None, max_retries_reached=False,
+                 s3_path=None):
         self.bytes_returned = bytes_returned
         self.bytes_scanned = bytes_scanned
         self.files_processed = files_processed
         self.records = records
         self.exception = exception
         self.max_retries_reached = max_retries_reached
+        self.s3_path = s3_path
 
 
 def format_bytes(bytes_count):
@@ -216,7 +220,8 @@ def refresh_status_bar(
 
 def select(prefixes=None, verbose=False, profile=None, thread_count=150,
            count=False, limit=0, output_fields=None, delimiter=None,
-           where=None, max_retries=20):
+           where=None, max_retries=20, with_filename=False):
+
     if prefixes is None:
         raise Exception("S3 path prefix must be defined")
 
@@ -281,6 +286,8 @@ def select(prefixes=None, verbose=False, profile=None, thread_count=150,
         refresh_status_bar(
             files_processed, records_matched, bytes_scanned, verbose)
 
+        matched_s3_path = event.s3_path
+
         for record in event.records:
             if count:
                 records_matched = records_matched + int(record)
@@ -288,7 +295,10 @@ def select(prefixes=None, verbose=False, profile=None, thread_count=150,
                 records_matched = records_matched + 1
                 if verbose:
                     print('\r\033[K', file=sys.stderr, end="")
-                print(record)
+                if with_filename:
+                    print(matched_s3_path + "\t" + record)
+                else:
+                    print(record)
                 refresh_status_bar(
                     files_processed, records_matched, bytes_scanned, verbose)
                 if 0 < limit <= records_matched:
@@ -359,6 +369,12 @@ if __name__ == "__main__":
         "--count",
         action='store_true',
         help="Only count records without printing them to stdout"
+    )
+    parser.add_argument(
+        "-H",
+        "--with_filename",
+        action='store_true',
+        help="Output s3 path of a filename that contained the match"
     )
     parser.add_argument(
         "-o",

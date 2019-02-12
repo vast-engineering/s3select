@@ -46,7 +46,7 @@ s3select uses the same authentication and endpoint configuration as [aws-cli](ht
 First get some help:
 <pre>
 $ s3select -h
-usage: s3select [-h] [-w WHERE] [-d DELIMITER] [-l LIMIT] [-v] [-c]
+usage: s3select [-h] [-w WHERE] [-d DELIMITER] [-l LIMIT] [-v] [-c] [-H]
                 [-o OUTPUT_FIELDS] [-t THREAD_COUNT] [--profile PROFILE]
                 [-M MAX_RETRIES]
                 prefixes [prefixes ...]
@@ -68,6 +68,7 @@ optional arguments:
                         Maximum number of results to return
   -v, --verbose         Be more verbose
   -c, --count           Only count records without printing them to stdout
+  -H, --with_filename   Output s3 path of a filename that contained the match
   -o OUTPUT_FIELDS, --output_fields OUTPUT_FIELDS
                         What fields or columns to output
   -t THREAD_COUNT, --thread_count THREAD_COUNT
