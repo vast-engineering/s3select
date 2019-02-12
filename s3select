@@ -287,7 +287,7 @@ def select(prefixes=None, verbose=False, profile=None, thread_count=150,
             else:
                 records_matched = records_matched + 1
                 if verbose:
-                    print('\r\033[K', file=sys.stderr)
+                    print('\r\033[K', file=sys.stderr, end="")
                 print(record)
                 refresh_status_bar(
                     files_processed, records_matched, bytes_scanned, verbose)
