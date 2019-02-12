@@ -67,12 +67,14 @@ class S3ListThread(threading.Thread):
 class ScanOneKey(threading.Thread):
     def __init__(
             self, files_queue, events_queue, s3, output_fields=None, count=None,
-            delimiter=None, where=None, limit=None, max_retries=None):
+            field_delimiter=None, record_delimiter=None, where=None, limit=None,
+            max_retries=None):
         threading.Thread.__init__(self)
         self.max_retries = max_retries
         self.limit = limit
         self.where = where
-        self.delimiter = delimiter
+        self.field_delimiter = field_delimiter
+        self.record_delimiter = record_delimiter
         self.count = count
         self.output_fields = output_fields
         self.files_queue = files_queue
@@ -99,10 +101,24 @@ class ScanOneKey(threading.Thread):
                 return
             input_ser = {'JSON': {"Type": "Document"}}
             output_ser = {'JSON': {}}
-            if self.delimiter is not None:
-                input_ser = {'CSV': {"FieldDelimiter": self.delimiter,
-                                     "FileHeaderInfo": "NONE"}}
-                output_ser = {'CSV': {"FieldDelimiter": self.delimiter}}
+            if self.field_delimiter is not None or \
+                    self.record_delimiter is not None:
+
+                if self.field_delimiter is None:
+                    self.field_delimiter = "\n"
+                if self.record_delimiter is None:
+                    self.record_delimiter = ","
+
+                input_ser = {
+                    'CSV':
+                        {
+                            "FieldDelimiter": self.field_delimiter,
+                            "FileHeaderInfo": "NONE",
+                            "RecordDelimiter": self.record_delimiter,
+                            "QuoteCharacter": ''
+                        }
+                }
+                output_ser = {'CSV': {"FieldDelimiter": self.field_delimiter}}
 
             if self.count:
                 # no need to parse JSON if we are only expecting the count of
@@ -221,15 +237,15 @@ def refresh_status_bar(
 
 
 def select(prefixes=None, verbose=False, profile=None, thread_count=150,
-           count=False, limit=0, output_fields=None, delimiter=None,
-           where=None, max_retries=20, with_filename=False):
-
+           count=False, limit=0, output_fields=None, field_delimiter=None,
+           record_delimiter=None, where=None, max_retries=20,
+           with_filename=False):
     if prefixes is None:
         raise Exception("S3 path prefix must be defined")
 
     # shortcut as specifying \t from command line is bit tricky with all escapes
-    if delimiter is not None and "\\t" in delimiter:
-        delimiter = '\t'
+    if field_delimiter is not None and "\\t" in field_delimiter:
+        field_delimiter = '\t'
 
     if profile is not None:
         boto3.setup_default_session(profile_name=profile)
@@ -249,7 +265,8 @@ def select(prefixes=None, verbose=False, profile=None, thread_count=150,
         else:
             thread = ScanOneKey(
                 files_queue, events_queue, s3, count=count, limit=limit,
-                output_fields=output_fields, delimiter=delimiter, where=where,
+                output_fields=output_fields, field_delimiter=field_delimiter,
+                record_delimiter=record_delimiter, where=where,
                 max_retries=max_retries)
 
         # daemon threads allow for fast exit if max number of records has been
@@ -351,9 +368,15 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "-d",
-        "--delimiter",
-        help="Delimiter to be used for CSV files. If specified CSV parsing will"
-             " be used. By default we expect JSON input"
+        "--field_delimiter",
+        help="Field delimiter to be used for CSV files. If specified CSV "
+             "parsing will be used. By default we expect JSON input"
+    )
+    parser.add_argument(
+        "-D",
+        "--record_delimiter",
+        help="Record delimiter to be used for CSV files. If specified CSV "
+             "parsing will be used. By default we expect JSON input"
     )
     parser.add_argument(
         "-l",

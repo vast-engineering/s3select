@@ -46,9 +46,9 @@ s3select uses the same authentication and endpoint configuration as [aws-cli](ht
 First get some help:
 <pre>
 $ s3select -h
-usage: s3select [-h] [-w WHERE] [-d DELIMITER] [-l LIMIT] [-v] [-c] [-H]
-                [-o OUTPUT_FIELDS] [-t THREAD_COUNT] [--profile PROFILE]
-                [-M MAX_RETRIES]
+usage: s3select [-h] [-w WHERE] [-d FIELD_DELIMITER] [-D RECORD_DELIMITER]
+                [-l LIMIT] [-v] [-c] [-H] [-o OUTPUT_FIELDS] [-t THREAD_COUNT]
+                [--profile PROFILE] [-M MAX_RETRIES]
                 prefixes [prefixes ...]
 
 s3select makes s3 select querying API much easier and faster
@@ -61,9 +61,14 @@ optional arguments:
   -h, --help            show this help message and exit
   -w WHERE, --where WHERE
                         WHERE part of the SQL query
-  -d DELIMITER, --delimiter DELIMITER
-                        Delimiter to be used for CSV files. If specified CSV
-                        parsing will be used. By default we expect JSON input
+  -d FIELD_DELIMITER, --field_delimiter FIELD_DELIMITER
+                        Field delimiter to be used for CSV files. If specified
+                        CSV parsing will be used. By default we expect JSON
+                        input
+  -D RECORD_DELIMITER, --record_delimiter RECORD_DELIMITER
+                        Record delimiter to be used for CSV files. If
+                        specified CSV parsing will be used. By default we
+                        expect JSON input
   -l LIMIT, --limit LIMIT
                         Maximum number of results to return
   -v, --verbose         Be more verbose
